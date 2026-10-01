@@ -1,71 +1,106 @@
+name: telco-churn
+
+# Pipeline order (enforced with depends_on conditions):
+#   generator ──(completed)──┐
+#   mlflow ─────(healthy)────┼──> trainer ──(completed)──> api
+#   jupyter (independent)
+
 services:
-  # ── Сервіс для генерації даних (як раніше)
+  # 1) One-shot job: generates data/telco_customers.csv
   generator:
-    build: .
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-    command: python src/generate_dataset_ext.py --samples 50000 --conv-samples 7500
-    healthcheck:
-      test: ["CMD", "python", "-c", "print('healthy')"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  # ── Сервіс для Jupyter (новий)
-  jupyter:
-    image: quay.io/jupyter/scipy-notebook:latest
-    # або quay.io/jupyter/datascience-notebook:latest якщо хочете більше пакетів
-    ports:
-      - "8888:8888"
-    volumes:
-      - ./notebooks:/home/jovyan/work
-      - ./data:/home/jovyan/data:ro           # тільки читання, щоб не змінювали випадково
-      - ./config:/home/jovyan/config:ro
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-      - JUPYTER_TOKEN=secret123               # змініть на свій або видаліть → отримаєте випадковий
-      - NB_USER=jovyan
-      - NB_UID=1000
-      - NB_GID=1000
-    restart: unless-stopped
-
-  api:
     build:
       context: .
-      dockerfile: Dockerfile.api
-    ports:
-      - "8000:8000"
+      dockerfile: Dockerfile
+    image: telco-churn/generator:latest
     volumes:
-      - ./models:/app/models
       - ./data:/app/data
-    depends_on:
-      - mlflow
-    environment:
-      - MODEL_PATH=/app/models/churn_model.pkl
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - ./config:/app/config:ro
+    command: python src/generate_dataset_ext.py --samples 20000 --conv-samples 3000
+    restart: "no"
 
+  # 2) MLflow tracking server + model registry (long-running)
   mlflow:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: telco-churn/mlflow:latest
     container_name: mlflow
     ports:
       - "5000:5000"
     volumes:
-      - ./mlartifacts:/mlartifacts
-      - ./mlflow_db:/mlflow_db
-    command: >
-      sh -c "apt-get update && apt-get install -y curl &&
-      pip install --no-cache-dir 'mlflow>=2.12.0,<3.0.0' 'starlette>=0.37.2,<0.38.0' 'anyio>=4.0.0,<5.0.0' &&
-      mlflow server --backend-store-uri sqlite:///mlflow_db/mlflow.db --default-artifact-root /mlartifacts --host 0.0.0.0 --port 5000 --timeout 120"
+      - mlflow-db:/mlflow/db
+      - mlflow-artifacts:/mlflow/artifacts
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5000/ || exit 1"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # 3) One-shot job: trains the model, logs it to MLflow, writes models/churn_model.pkl
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    image: telco-churn/trainer:latest
+    depends_on:
+      generator:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
+    environment:
+      - DATA_PATH=/app/data/telco_customers.csv
+      - MODEL_PATH=/app/models/churn_model.pkl
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_EXPERIMENT=telco_churn_experiment
+      - MLFLOW_REGISTER_MODEL=true
+      - MLFLOW_REGISTERED_NAME=ChurnModel
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models
+    restart: "no"
+
+  # 4) FastAPI prediction service (long-running)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      target: runtime
+    image: telco-churn/api:latest
+    container_name: churn-api
+    depends_on:
+      trainer:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_PATH=/app/models/churn_model.pkl
+    volumes:
+      - ./models:/app/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
-      timeout: 10s
-      retries: 5
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
+  # 5) JupyterLab for exploration (optional, long-running)
+  jupyter:
+    image: quay.io/jupyter/scipy-notebook:latest
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data:ro
+      - ./config:/home/jovyan/config:ro
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=secret123
+    restart: unless-stopped
+    profiles: ["jupyter"]
 
+volumes:
+  mlflow-db:
+  mlflow-artifacts:

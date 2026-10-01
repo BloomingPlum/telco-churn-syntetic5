@@ -1,0 +1,16 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.vagrant
+.ipynb_checkpoints
+notebooks/
+data/
+models/*.pkl
+mlflow_db/
+mlartifacts/
+docs/
+*.md
+!README.md

@@ -1,0 +1,8 @@
+# Deps for pipelines/train.py.
+# scikit-learn / joblib / pandas MUST match requirements-api.txt,
+# otherwise the pickled model may fail to load in the API container.
+pandas==2.2.3
+scikit-learn==1.5.2
+joblib==1.4.2
+tqdm==4.66.5
+mlflow-skinny==2.17.2

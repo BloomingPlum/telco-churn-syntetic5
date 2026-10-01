@@ -1,0 +1,6 @@
+# Deps for src/generate_dataset_ext.py only (no jupyter/matplotlib)
+pandas==2.2.3
+numpy<2.1
+pyyaml>=6.0
+faker>=25.0.0
+tqdm

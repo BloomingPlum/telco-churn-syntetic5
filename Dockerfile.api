@@ -1,13 +1,44 @@
-FROM python:3.11-slim
+# ─────────────────────────────────────────────────────────────
+# Stage 1 — builder: compile/install all Python deps into a venv
+# ─────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
 
-WORKDIR /app
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# build tools live ONLY in this stage and never reach the final image
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements-api.txt .
-RUN pip install --no-cache-dir -r requirements-api.txt
+RUN pip install -r requirements-api.txt
 
-COPY src/ src/
-COPY models/ models/   
+# ─────────────────────────────────────────────────────────────
+# Stage 2 — runtime: only the venv + app code, non-root user
+# ─────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
 
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MODEL_PATH=/app/models/churn_model.pkl
+
+RUN useradd --create-home --uid 1001 appuser
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --chown=appuser:appuser src/api/ src/api/
+# The model is NOT baked into the image — it is mounted at runtime (./models)
+RUN mkdir -p /app/models && chown appuser:appuser /app/models
+
+USER appuser
 EXPOSE 8000
+
+# python-slim has no curl, so check health with the stdlib
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"
 
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
