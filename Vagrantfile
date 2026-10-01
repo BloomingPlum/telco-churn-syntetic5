@@ -16,7 +16,7 @@ Vagrant.configure("2") do |config|
     vb.cpus   = 2
     vb.gui    = false
     # send the serial console log to NUL instead of the project folder (fixes boot hangs)
-    vb.customize ["modifyvm", :id, "--uartmode1", "file", File::NULL]
+    vb.customize ["modifyvm", :id, "--uartmode1", "file", File.join(Dir.home, "telco-mlops-console.log")]
   end
 
   config.vm.provision "shell", env: { "REPO_URL" => REPO_URL }, inline: <<-SHELL
